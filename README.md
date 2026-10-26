@@ -5,8 +5,11 @@ signals every 20 ms. A Python pipeline stores them in Postgres, a detector
 finds cobble incidents, and a Next.js app lets signed-in operators watch the
 mill live, explore history and investigate incidents.
 
-* **Live demo:** _URL added after deployment_
-* **Demo login:** _added after deployment_
+* **Live demo:** https://mono-edge-signals-seven.vercel.app
+* **Demo login:** `demo@millsignals.dev` / `MillDemo2026!` (or sign up with any email)
+
+The hosted Live page replays the stored 10 minute seed loop (badge "REPLAY"),
+so a cobble alert fires about once a minute while you watch.
 
 ## Architecture
 
