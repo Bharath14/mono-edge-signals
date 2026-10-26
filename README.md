@@ -191,7 +191,9 @@ visible on a 10 minute chart.
    The lockdown script stops Supabase's public REST API from reading the
    tables (the app connects to Postgres directly and does not need it).
 3. **Vercel**: import the GitHub repo, set Root Directory to `web`, and add
-   the environment variables:
+   the environment variables. `web/vercel.json` pins the functions to Tokyo
+   (`hnd1`), the same region as the Supabase database, because every API call
+   makes a few queries and cross-region round trips would add up:
    * `DATABASE_URL`: the Transaction pooler string (port 6543)
    * `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`: from
      Project Settings > API
