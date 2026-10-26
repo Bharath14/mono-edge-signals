@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+/* Control room style: dark only, one surface colour, signal colours carry meaning. */
+:root {
+  --background: #0b1016;
+  --panel: #121a23;
+  --border: #223041;
+  --muted: #8796a8;
+  --foreground: #e6edf3;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-panel: var(--panel);
+  --color-line: var(--border);
+  --color-muted: var(--muted);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}

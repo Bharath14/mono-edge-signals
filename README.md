@@ -1,30 +1,45 @@
-# Mill signal simulator and ingestion pipeline
+# Mill Signals: rolling mill monitoring
 
-Part 1 of the Mono Edge signal analytics challenge: a synthetic rolling mill
-data source, the pipeline that stores it in Postgres, and the cobble detector.
-The API and dashboard come next.
+Mono Edge signal analytics challenge. A synthetic rolling mill sends six PLC
+signals every 20 ms. A Python pipeline stores them in Postgres, a detector
+finds cobble incidents, and a Next.js app lets signed-in operators watch the
+mill live, explore history and investigate incidents.
 
-## Quick start
+* **Live demo:** _URL added after deployment_
+* **Demo login:** _added after deployment_
 
-```bash
-docker compose up -d                       # Postgres 16 on localhost:5432
-python3 -m venv .venv && source .venv/bin/activate   # Python 3.10 or newer
-pip install -r requirements.txt
-cp .env.example .env                       # DATABASE_URL for the local container
-export DATABASE_URL=postgresql://mill:mill@localhost:5432/millsignals
+## Architecture
 
-python -m simulator.seed --reset           # build and load the 10 minute loop, then detect incidents
-python -m detector.store                   # re-run detection on its own (safe to repeat)
-python -m pytest tests                     # unit tests (no database needed)
-TEST_DATABASE_URL=$DATABASE_URL python -m pytest tests   # plus database tests
+```
+  LAPTOP (Python)                    POSTGRES                    VERCEL (Next.js)
+
+  generator  20 ms ticks                                         proxy.ts  login check
+      |                                                              |
+  cleaning   types, ranges   --->  raw_readings                 /api/live       --> Live page
+      |                            processed_readings  <------  /api/history    --> History page
+  pipeline   batch, retry,         historical_rollups           /api/incidents  --> Incidents
+             spool                 incidents                         |
+      |                            incident_snapshots           Supabase Auth
+  detector   cobble rules  --->  (writes incidents)              (email + password)
 ```
 
-The database tests wipe the tables, so point `TEST_DATABASE_URL` at a scratch
-database. Running the seed twice is safe: every insert is idempotent.
+The simulator and detector run on a laptop. Locally they write to Postgres in
+Docker; for the hosted demo the same seed is loaded into Supabase Postgres by
+pointing `DATABASE_URL` at it. The web app only reads.
 
-No Docker? Any Postgres 16 works, for example on macOS:
-`brew install postgresql@16 && brew services start postgresql@16`, then create
-a `mill` role with password `mill` and a `millsignals` database.
+## Stack and why
+
+| Part | Choice | Why |
+|---|---|---|
+| Simulator, pipeline, detector | Python 3, psycopg 3 | Quick to write and test, and the detector is plain code that runs the same over history and live rows. |
+| Message transport | None, batched inserts | About 50 rows per second fits easily in plain batched inserts. A broker (Kafka or similar) would sit between producer and writer at many mills or when several consumers need the stream. |
+| Database | Postgres 16 (Docker locally, Supabase hosted) | Time series in a wide table, hourly partitions for cheap retention, `date_bin` for downsampling, JSONB for the raw layer. One `DATABASE_URL` switches local vs cloud. No extension needed, so any host works. |
+| Hosted database | Supabase (free tier) | Postgres plus authentication in one free project, so one account covers both. The seed loop is about 18 MB, well inside the 500 MB limit. |
+| Web app | Next.js 16 (App Router, TypeScript) | Pages and API routes in one project, deploys to Vercel with no extra setup. API routes talk to Postgres directly with the `postgres` driver, so the SQL is visible and easy to explain. |
+| Authentication | Supabase Auth, email and password | Sign-up, sign-in, hashed passwords and session cookies already done and maintained. Writing that by hand is where security bugs live, and it would not show anything about data engineering. The check runs in `proxy.ts` on every page and API request. |
+| Charts | Recharts | Simple React API and enough for the point counts here, because the server downsamples first (about 300 points per live chart, 600 to 1500 for history). With raw 20 ms data in the browser a canvas library such as uPlot would be the better pick. |
+| Live updates | Polling every 1 s | Vercel functions are short lived, so held-open streams (SSE, WebSocket) are a poor fit. A 1 s poll is cheap, survives reconnects and is fast enough for operators. |
+| Hosting | Vercel | Free, deploys from GitHub on every push. |
 
 ## The 10 minute loop
 
@@ -113,3 +128,74 @@ Limits: the thresholds are tuned to the synthetic data. On a real mill they
 would be set from historical incidents and per mill. A cobble that happens
 while speed is already ramping hard, or a slow jam without a vibration jump,
 would need extra rules.
+
+## Web app
+
+Code is in `web/`. Pages: **Live** (status, latest values, live charts,
+alerts), **History** (signal and time range, trend with min to max band,
+normal vs abnormal stats), **Incidents** (alert history) and an **incident
+view** (all signals 30 s either side, peaks vs normal).
+
+### Run locally
+
+```bash
+cd web
+npm install
+cp .env.example .env.local     # DATABASE_URL already points at the local database
+npm run dev                    # http://localhost:3000
+```
+
+With the two Supabase variables empty, local development runs without login
+(the header says "auth off"). A production build refuses every request until
+they are set, so a missing setting can never expose the app.
+
+### Live vs replay
+
+The hosted app cannot reach a simulator on a laptop, so the Live page has two
+modes, chosen per request:
+
+* **LIVE**: the newest stored row is less than 10 s old, so a simulator is
+  streaming. Charts show the last 30 s to 2 min of real data.
+* **REPLAY (demo loop)**: otherwise the stored 10 minute seed loop is replayed
+  on the wall clock: `loop position = now mod 10 min`. Every viewer sees the
+  same moment, the server keeps no state, and a window that crosses the loop
+  start is stitched from the end of the loop.
+
+Alerts appear as the replay reaches them, so a reviewer sees a cobble alert
+fire within a minute of opening the page. History and the incident pages
+always show stored data by its real timestamps.
+
+### How the API keeps the browser light
+
+| Endpoint | Reads | Downsampling |
+|---|---|---|
+| `/api/live` | `processed_readings` | 200 ms averages (300 points per minute) |
+| `/api/history`, up to 5 min | `processed_readings` | full 20 ms or binned to about 1500 points, with min and max |
+| `/api/history`, longer | `historical_rollups` | 1 s or wider buckets, about 1000 points, with min and max |
+| `/api/incidents/:id` | `incident_snapshots` | 100 ms averages |
+
+Min and max travel with every averaged point, so a cobble spike is still
+visible on a 10 minute chart.
+
+## Deployment
+
+1. **Supabase**: create a free project. In Authentication > Sign In / Providers
+   > Email, turn off "Confirm email" so demo sign-ups work at once.
+2. **Load the data** from the laptop, using the Session pooler connection
+   string (Project Settings > Database):
+   ```bash
+   export DATABASE_URL='postgresql://postgres.<ref>:<password>@<region>.pooler.supabase.com:5432/postgres'
+   python -m simulator.seed --reset
+   psql "$DATABASE_URL" -f db/supabase_lockdown.sql
+   ```
+   The lockdown script stops Supabase's public REST API from reading the
+   tables (the app connects to Postgres directly and does not need it).
+3. **Vercel**: import the GitHub repo, set Root Directory to `web`, and add
+   the environment variables:
+   * `DATABASE_URL`: the Transaction pooler string (port 6543)
+   * `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`: from
+     Project Settings > API
+4. Sign up once on the deployed app to create the demo account.
+
+Free Supabase projects pause after a week without activity. If the demo
+shows a connection error, the project needs to be resumed in the dashboard.

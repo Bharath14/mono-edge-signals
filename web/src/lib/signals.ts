@@ -1,0 +1,47 @@
+// Signal metadata shared by the API routes and the UI. Column names match
+// processed_readings; `rollup` is the prefix used in historical_rollups.
+
+export const SIGNALS = [
+  { key: "motor_speed", label: "Motor speed", unit: "rpm", rollup: "speed", color: "#38bdf8" },
+  { key: "motor_current", label: "Motor current", unit: "A", rollup: "current", color: "#a78bfa" },
+  { key: "torque", label: "Torque", unit: "kN·m", rollup: "torque", color: "#f472b6" },
+  { key: "rolling_force", label: "Rolling force", unit: "kN", rollup: "force", color: "#fb923c" },
+  { key: "vibration", label: "Vibration", unit: "mm/s", rollup: "vib", color: "#facc15" },
+  { key: "temperature", label: "Temperature", unit: "°C", rollup: "temp", color: "#4ade80" },
+] as const;
+
+export type SignalKey = (typeof SIGNALS)[number]["key"];
+export type Signal = (typeof SIGNALS)[number];
+
+export const SIGNAL_KEYS = SIGNALS.map((s) => s.key) as SignalKey[];
+
+export function getSignal(key: string | null): Signal | undefined {
+  return SIGNALS.find((s) => s.key === key);
+}
+
+export const DEFAULT_MILL = "RM-01";
+
+// The seed loop is stored at a fixed synthetic date (see simulator/config.py).
+// The hosted demo replays it: every viewer sees the same position because the
+// position is computed from the wall clock, with no server state.
+export const LOOP_START_MS = Date.UTC(2026, 0, 1, 0, 0, 0);
+export const LOOP_MS = 600_000;
+export const LOOP_END_MS = LOOP_START_MS + LOOP_MS;
+
+// Newest stored row younger than this means a simulator is streaming: show
+// real live data instead of the replay.
+export const LIVE_THRESHOLD_MS = 10_000;
+
+export function replayNow(nowMs: number): number {
+  return LOOP_START_MS + (nowMs % LOOP_MS);
+}
+
+export type Incident = {
+  id: number;
+  mill_id: string;
+  started_at: string;
+  ended_at: string | null;
+  affected_signals: string[];
+  reason: string;
+  peak_values: Record<string, unknown> | null;
+};
