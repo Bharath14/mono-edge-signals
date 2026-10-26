@@ -202,5 +202,9 @@ visible on a 10 minute chart.
      Project Settings > API
 4. Sign up once on the deployed app to create the demo account.
 
+The Vercel project is connected to this GitHub repo with Root Directory
+`web`, so every push to `main` deploys to production and other branches get
+preview URLs. A failed build never replaces the running site.
+
 Free Supabase projects pause after a week without activity. If the demo
 shows a connection error, the project needs to be resumed in the dashboard.
