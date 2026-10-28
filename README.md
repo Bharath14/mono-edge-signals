@@ -44,9 +44,38 @@ pointing `DATABASE_URL` at it. The web app only reads.
 | Live updates | Polling every 1 s | Vercel functions are short lived, so held-open streams (SSE, WebSocket) are a poor fit. A 1 s poll is cheap, survives reconnects and is fast enough for operators. |
 | Hosting | Vercel | Free, deploys from GitHub on every push. |
 
+## Quick start
+
+```bash
+docker compose up -d                       # Postgres 16 on localhost:5432
+python3 -m venv .venv && source .venv/bin/activate   # Python 3.10 or newer
+pip install -r requirements.txt
+cp .env.example .env                       # DATABASE_URL for the local container
+export DATABASE_URL=postgresql://mill:mill@localhost:5432/millsignals
+
+python -m simulator.seed --reset           # build and load the 10 minute loop for every mill, then detect incidents
+python -m simulator.seed --mill RM-02      # just one mill (repeatable)
+python -m detector.store --mill RM-02      # re-run detection on its own (safe to repeat)
+python -m pytest tests                     # unit tests (no database needed)
+TEST_DATABASE_URL=postgresql://mill:mill@localhost:5432/millsignals_test python -m pytest tests   # plus database tests
+
+cd web && npm install && cp .env.example .env.local && npm run dev   # web app on http://localhost:3000
+```
+
+The database tests wipe the tables, so point `TEST_DATABASE_URL` at a scratch
+database. Running the seed twice is safe: every insert is idempotent.
+
+No Docker? Any Postgres 16 works, for example on macOS:
+`brew install postgresql@16 && brew services start postgresql@16`, then create
+a `mill` role with password `mill` and a `millsignals` database.
+
 ## The 10 minute loop
 
-One mill (`RM-01`), six signals, one reading every 20 ms (30,000 ticks).
+Two mills, six signals each, one reading every 20 ms (30,000 ticks per mill
+per loop). Each mill has its own operating point and its own day, so the
+detector is tested on two different shapes of normal.
+
+**RM-01** (roughing stand, 1000 rpm, 150 A, 40 kN.m, 2000 kN)
 
 | Time | Event | What the data does |
 |---|---|---|
@@ -55,8 +84,22 @@ One mill (`RM-01`), six signals, one reading every 20 ms (30,000 ticks).
 | 7:00 to 8:10 | Legitimate speed setpoint change | speed steps down about 10 percent smoothly and back |
 
 The cobbles at 2:30 and 3:30 sit at the edges of the load change on purpose.
-Event times live in `simulator/config.py`, and `generator.ground_truth()`
-returns them so the detector can be tested against known answers.
+
+**RM-02** (finishing stand, 1200 rpm, 110 A, 25 kN.m, 1500 kN)
+
+| Time | Event | What the data does |
+|---|---|---|
+| 1:10, 2:30, 4:40, 8:20 | Cobble (4 per loop) | same pattern as RM-01, scaled to this stand |
+| 1:45 to 3:20 | Legitimate speed setpoint change | speed steps **up** about 8 percent and back |
+| 5:30 to 6:45 | Legitimate load change | current, torque, rolling force rise about 30 percent |
+
+The 2:30 cobble on RM-02 happens while speed sits at the raised setpoint, so
+the drop is measured from 1298 rpm, not from the usual 1200. That only works
+because the detector compares against a rolling baseline.
+
+Mill profiles and event times live in `simulator/config.py` (`MILLS`), and
+`generator.ground_truth(mill)` returns them so the detector can be tested
+against known answers. Adding a mill is one more profile there.
 
 ## Data layers
 
@@ -122,9 +165,11 @@ How it works:
 The detector is a streaming state machine (`CobbleDetector.update(row)`), so
 the same code runs over stored history and over live data as it arrives.
 
-Results on the seed loop: 10 of 10 cobbles detected, each opening 0.10 to
-0.16 s after the cobble starts, and no incidents during the load change or the
-speed step. The tests repeat this on other noise seeds with data faults
+Results on the seed loop: RM-01 10 of 10 and RM-02 4 of 4 cobbles detected,
+each opening 0.10 to 0.16 s after the cobble starts, and no incidents during
+either mill's load change or speed step (down on RM-01, up on RM-02). The same
+thresholds work on both stands because everything is relative to each mill's
+own baseline. The tests repeat this on other noise seeds with data faults
 injected. Thresholds are constants at the top of `detector/cobble.py`.
 
 Limits: the thresholds are tuned to the synthetic data. On a real mill they

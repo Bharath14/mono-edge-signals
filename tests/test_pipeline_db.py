@@ -27,8 +27,8 @@ def count(conn, table):
 @pytest.fixture(scope="module")
 def seeded(tmp_path_factory):
     spool = str(tmp_path_factory.mktemp("spool") / "pending.jsonl")
-    first = seed(DSN, reset=True, spool_path=spool)
-    return first
+    # RM-01 only here; the second mill has its own test at the end.
+    return seed(DSN, reset=True, spool_path=spool, mills=["RM-01"])["RM-01"]
 
 
 def test_seed_loads_every_layer(seeded):
@@ -76,7 +76,7 @@ def test_raw_keeps_malformed_messages_exactly(seeded):
 def test_rerunning_the_seed_adds_nothing(seeded, tmp_path):
     with psycopg.connect(DSN) as conn:
         before = {t: count(conn, t) for t in ("raw_readings", "processed_readings", "rejected_readings", "historical_rollups")}
-    again = seed(DSN, spool_path=str(tmp_path / "pending.jsonl"))
+    again = seed(DSN, spool_path=str(tmp_path / "pending.jsonl"), mills=["RM-01"])["RM-01"]
     with psycopg.connect(DSN) as conn:
         after = {t: count(conn, t) for t in before}
     assert before == after
@@ -187,3 +187,25 @@ def test_rerunning_detection_does_not_duplicate(seeded):
         detect_range(conn, c.MILL_ID, c.LOOP_START, end)
         after = (count(conn, "incidents"), count(conn, "incident_snapshots"))
     assert before == after
+
+
+def test_second_mill_gets_its_own_data_and_incidents(seeded, tmp_path):
+    from simulator import generator as g
+
+    with psycopg.connect(DSN) as conn:
+        rm01_before = conn.execute("SELECT count(*) FROM incidents WHERE mill_id = 'RM-01'").fetchone()[0]
+    result = seed(DSN, spool_path=str(tmp_path / "pending.jsonl"), mills=["RM-02"])["RM-02"]
+    truth = g.ground_truth(c.MILLS["RM-02"])["cobbles"]
+    assert result["incidents"] == len(truth) == 4
+    with psycopg.connect(DSN) as conn:
+        starts = [r[0] for r in conn.execute(
+            "SELECT started_at FROM incidents WHERE mill_id = 'RM-02' ORDER BY started_at"
+        ).fetchall()]
+        rm01_after = conn.execute("SELECT count(*) FROM incidents WHERE mill_id = 'RM-01'").fetchone()[0]
+        rollup_mills = dict(conn.execute(
+            "SELECT mill_id, count(*) FROM historical_rollups GROUP BY 1"
+        ).fetchall())
+    assert rm01_before == rm01_after == 10
+    for started, cob in zip(starts, truth):
+        assert cob["start_s"] <= (started - c.LOOP_START).total_seconds() < cob["start_s"] + 0.5
+    assert rollup_mills["RM-01"] == rollup_mills["RM-02"] == 600

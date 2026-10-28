@@ -5,6 +5,7 @@ Usage
     python -m simulator.seed                 # seed the database in DATABASE_URL
     python -m simulator.seed --reset         # wipe the tables first
     python -m simulator.seed --no-faults     # clean data only
+    python -m simulator.seed --mill RM-02    # one mill only (repeatable)
 
 Running it twice is safe: every insert is idempotent.
 """
@@ -78,16 +79,13 @@ def summarize(dsn):
     return out
 
 
-def seed(dsn, batch_size=500, faults=True, reset=False, spool_path="spool/pending_batches.jsonl"):
-    apply_schema(dsn)
-    if reset:
-        reset_tables(dsn)
-
-    data = generator.generate_loop()
-    messages = generator.build_messages(data)
+def seed_mill(dsn, mill, batch_size=500, faults=True, spool_path="spool/pending_batches.jsonl"):
+    """Generate one mill's loop and push it through the pipeline."""
+    data = generator.generate_loop(mill=mill)
+    messages = generator.build_messages(data, mill_id=mill.mill_id)
     fault_counts = {}
     if faults:
-        messages, fault_counts = generator.inject_faults(messages)
+        messages, fault_counts = generator.inject_faults(messages, seed=mill.seed + 1)
 
     ingestor = Ingestor(dsn, spool_path=spool_path)
     started = time.time()
@@ -97,8 +95,8 @@ def seed(dsn, batch_size=500, faults=True, reset=False, spool_path="spool/pendin
 
     with psycopg.connect(dsn) as conn:
         end = c.LOOP_START + timedelta(seconds=c.LOOP_SECONDS)
-        buckets = rollup_range(conn, c.MILL_ID, c.LOOP_START, end)
-        incidents = detect_range(conn, c.MILL_ID, c.LOOP_START, end)
+        buckets = rollup_range(conn, mill.mill_id, c.LOOP_START, end)
+        incidents = detect_range(conn, mill.mill_id, c.LOOP_START, end)
     ingestor.close()
 
     return {
@@ -113,19 +111,35 @@ def seed(dsn, batch_size=500, faults=True, reset=False, spool_path="spool/pendin
     }
 
 
+def seed(dsn, batch_size=500, faults=True, reset=False, mills=None,
+         spool_path="spool/pending_batches.jsonl"):
+    """Seed the given mill ids (default: all mills in config.MILLS)."""
+    apply_schema(dsn)
+    if reset:
+        reset_tables(dsn)
+    return {
+        mill_id: seed_mill(dsn, c.MILLS[mill_id], batch_size, faults, spool_path)
+        for mill_id in (mills or c.MILLS)
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("--dsn", default=c.DATABASE_URL)
     parser.add_argument("--reset", action="store_true", help="wipe tables before seeding")
     parser.add_argument("--no-faults", action="store_true", help="do not inject data faults")
     parser.add_argument("--batch-size", type=int, default=500)
+    parser.add_argument(
+        "--mill", action="append", choices=sorted(c.MILLS), help="seed only this mill (repeatable)"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    result = seed(args.dsn, args.batch_size, faults=not args.no_faults, reset=args.reset)
-    print("Seed run:")
-    for key, value in result.items():
-        print(f"  {key}: {value}")
+    results = seed(args.dsn, args.batch_size, faults=not args.no_faults, reset=args.reset, mills=args.mill)
+    for mill_id, result in results.items():
+        print(f"Seed run {mill_id}:")
+        for key, value in result.items():
+            print(f"  {key}: {value}")
     print("Database now holds:")
     for key, value in summarize(args.dsn).items():
         print(f"  {key}: {value}")

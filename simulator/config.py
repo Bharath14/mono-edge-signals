@@ -5,6 +5,7 @@ Everything about the seed loop lives here so the generator, the detector
 """
 
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 DATABASE_URL = os.environ.get(
@@ -96,3 +97,68 @@ FAULT_RATES = {
     "bad_timestamp": 0.0003,    # timestamp is garbage
 }
 SENTINEL = -9999.0
+
+
+# ---- Mills --------------------------------------------------------------------
+# Each mill has its own operating point and event schedule. RM-01 uses the
+# constants above. RM-02 is a lighter, faster finishing stand with a different
+# day: fewer cobbles, a speed setpoint INCREASE, a smaller load change later in
+# the loop, and one cobble while speed sits at the raised setpoint.
+@dataclass(frozen=True)
+class MillProfile:
+    mill_id: str
+    seed: int
+    base_speed: float
+    base_current: float
+    base_torque: float
+    base_force: float
+    base_vibration: float
+    base_temperature: float
+    cobble_starts_s: tuple
+    load_ramp_up_s: tuple
+    load_ramp_down_s: tuple
+    load_factor: float
+    speed_step_down_s: tuple  # first ramp (named for RM-01, where it goes down)
+    speed_step_up_s: tuple    # ramp back to the base setpoint
+    speed_step_factor: float  # below 1 lowers the setpoint, above 1 raises it
+
+
+MILLS = {
+    "RM-01": MillProfile(
+        mill_id="RM-01",
+        seed=SEED,
+        base_speed=BASE_SPEED_RPM,
+        base_current=BASE_CURRENT_A,
+        base_torque=BASE_TORQUE,
+        base_force=BASE_FORCE_KN,
+        base_vibration=BASE_VIBRATION,
+        base_temperature=BASE_TEMPERATURE,
+        cobble_starts_s=COBBLE_STARTS_S,
+        load_ramp_up_s=LOAD_RAMP_UP_S,
+        load_ramp_down_s=LOAD_RAMP_DOWN_S,
+        load_factor=LOAD_FACTOR,
+        speed_step_down_s=SPEED_STEP_DOWN_S,
+        speed_step_up_s=SPEED_STEP_UP_S,
+        speed_step_factor=SPEED_STEP_FACTOR,
+    ),
+    "RM-02": MillProfile(
+        mill_id="RM-02",
+        seed=SEED + 100,
+        base_speed=1200.0,
+        base_current=110.0,
+        base_torque=25.0,
+        base_force=1500.0,
+        base_vibration=1.5,
+        base_temperature=68.0,
+        # 1:10, 2:30 (during the raised setpoint), 4:40, 8:20
+        cobble_starts_s=(70, 150, 280, 500),
+        # load change 5:30 to 6:45, +30 percent
+        load_ramp_up_s=(330.0, 345.0),
+        load_ramp_down_s=(390.0, 405.0),
+        load_factor=1.3,
+        # speed setpoint +8 percent from 1:45, back by 3:20
+        speed_step_down_s=(105.0, 125.0),
+        speed_step_up_s=(180.0, 200.0),
+        speed_step_factor=1.08,
+    ),
+}

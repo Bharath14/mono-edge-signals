@@ -21,6 +21,23 @@ export function getSignal(key: string | null): Signal | undefined {
 
 export const DEFAULT_MILL = "RM-01";
 
+// Shortcuts into each mill's seed loop (seconds from loop start). They mirror
+// the event schedules in simulator/config.py.
+export const MILL_PRESETS: Record<string, { label: string; from: number; to: number }[]> = {
+  "RM-01": [
+    { label: "Whole loop (10 min)", from: 0, to: 600 },
+    { label: "Cobble at 0:30", from: 20, to: 50 },
+    { label: "Load change 2:00 to 3:45", from: 120, to: 225 },
+    { label: "Speed step down 6:50 to 8:20", from: 410, to: 500 },
+  ],
+  "RM-02": [
+    { label: "Whole loop (10 min)", from: 0, to: 600 },
+    { label: "Cobble at 1:10", from: 60, to: 90 },
+    { label: "Speed step up 1:35 to 3:30, cobble at 2:30", from: 95, to: 210 },
+    { label: "Load change 5:20 to 6:55", from: 320, to: 415 },
+  ],
+};
+
 // The seed loop is stored at a fixed synthetic date (see simulator/config.py).
 // The hosted demo replays it: every viewer sees the same position because the
 // position is computed from the wall clock, with no server state.

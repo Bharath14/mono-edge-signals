@@ -6,7 +6,7 @@ import SignalChart from "@/components/SignalChart";
 import SignalPicker from "@/components/SignalPicker";
 import { useMills } from "@/components/useMills";
 import { fmtDuration, fmtNum, fmtUtc, fmtUtcTime, fromUtcInput, toUtcInput } from "@/lib/format";
-import { DEFAULT_MILL, LOOP_START_MS, getSignal, type SignalKey } from "@/lib/signals";
+import { DEFAULT_MILL, LOOP_START_MS, MILL_PRESETS, getSignal, type SignalKey } from "@/lib/signals";
 
 type Stats = { points: number; avg: number; min: number; max: number } | null;
 type HistoryData = {
@@ -16,13 +16,6 @@ type HistoryData = {
   stats: { normal: Stats; abnormal: Stats };
 };
 
-// Shortcuts into the seed loop (offsets in seconds from its start).
-const PRESETS = [
-  { label: "Whole loop (10 min)", from: 0, to: 600 },
-  { label: "Cobble at 0:30", from: 20, to: 50 },
-  { label: "Load change 2:00 to 3:45", from: 120, to: 225 },
-  { label: "Speed step 6:50 to 8:20", from: 410, to: 500 },
-];
 
 export default function HistoryPage() {
   const mills = useMills();
@@ -112,7 +105,7 @@ export default function HistoryPage() {
 
       <div className="flex flex-wrap gap-2 text-xs">
         <span className="text-muted py-1">Seed loop shortcuts:</span>
-        {PRESETS.map((p) => (
+        {(MILL_PRESETS[mill] ?? MILL_PRESETS[DEFAULT_MILL]).map((p) => (
           <button
             key={p.label}
             onClick={() => {

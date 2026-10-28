@@ -17,6 +17,8 @@ import numpy as np
 
 from . import config as c
 
+RM01 = c.MILLS[c.MILL_ID]
+
 
 # ---------------------------------------------------------------- helpers ---
 def _smoothstep(x):
@@ -39,19 +41,19 @@ def _ar1(rng, n, phi, sigma):
     return out
 
 
-def load_profile(t):
-    """1.0 normally, rising smoothly to LOAD_FACTOR during the load change."""
-    return 1.0 + (c.LOAD_FACTOR - 1.0) * (
-        _ramp(t, c.LOAD_RAMP_UP_S) - _ramp(t, c.LOAD_RAMP_DOWN_S)
+def load_profile(t, mill=RM01):
+    """1.0 normally, rising smoothly to load_factor during the load change."""
+    return 1.0 + (mill.load_factor - 1.0) * (
+        _ramp(t, mill.load_ramp_up_s) - _ramp(t, mill.load_ramp_down_s)
     )
 
 
-def speed_setpoint(t):
-    """Speed setpoint in rpm, with one legitimate step down and back up."""
-    drop = (1.0 - c.SPEED_STEP_FACTOR) * (
-        _ramp(t, c.SPEED_STEP_DOWN_S) - _ramp(t, c.SPEED_STEP_UP_S)
+def speed_setpoint(t, mill=RM01):
+    """Speed setpoint in rpm, with one legitimate step away and back."""
+    drop = (1.0 - mill.speed_step_factor) * (
+        _ramp(t, mill.speed_step_down_s) - _ramp(t, mill.speed_step_up_s)
     )
-    return c.BASE_SPEED_RPM * (1.0 - drop)
+    return mill.base_speed * (1.0 - drop)
 
 
 def cobble_components(t, t0):
@@ -78,19 +80,22 @@ def cobble_components(t, t0):
 
 
 # ------------------------------------------------------------- generation ---
-def generate_loop(seed=c.SEED):
-    """Return {'t': seconds array, <signal>: values} for one full loop."""
-    rng = np.random.default_rng(seed)
+def generate_loop(seed=None, mill=RM01):
+    """Return {'t': seconds array, <signal>: values} for one full loop.
+
+    `seed` defaults to the mill's own seed, so every mill is reproducible.
+    """
+    rng = np.random.default_rng(mill.seed if seed is None else seed)
     n = c.LOOP_TICKS
     t = np.arange(n) / c.SAMPLE_HZ
 
-    load = load_profile(t)
-    sp = speed_setpoint(t)
+    load = load_profile(t, mill)
+    sp = speed_setpoint(t, mill)
 
     env = np.zeros(n)
     dip = np.zeros(n)
     fast = np.zeros(n)
-    for t0 in c.COBBLE_STARTS_S:
+    for t0 in mill.cobble_starts_s:
         e, d, f = cobble_components(t, float(t0))
         env += e
         dip += d
@@ -102,17 +107,17 @@ def generate_loop(seed=c.SEED):
 
     speed = sp + _ar1(rng, n, 0.95, 2.5) - 0.65 * sp * dip
 
-    current_base = c.BASE_CURRENT_A * load_eff * (sp / c.BASE_SPEED_RPM)
+    current_base = mill.base_current * load_eff * (sp / mill.base_speed)
     current = current_base + rng.normal(0, 0.8, n) + 0.6 * current_base * fast
 
-    torque_base = c.BASE_TORQUE * load_eff
+    torque_base = mill.base_torque * load_eff
     torque = torque_base + rng.normal(0, 0.15, n) + 0.5 * torque_base * fast
 
-    force_base = c.BASE_FORCE_KN * load_eff
+    force_base = mill.base_force * load_eff
     force = force_base + rng.normal(0, 8.0, n) + 0.25 * force_base * fast
 
     vibration = (
-        c.BASE_VIBRATION
+        mill.base_vibration
         + 0.1 * (load - 1.0)
         + rng.normal(0, 0.12, n)
         + 5.0 * env
@@ -121,10 +126,10 @@ def generate_loop(seed=c.SEED):
     vibration = np.clip(vibration, 0.05, None)
 
     # Temperature follows load slowly (first order lag, 60 s time constant).
-    target = c.BASE_TEMPERATURE + 8.0 * (load - 1.0)
+    target = mill.base_temperature + 8.0 * (load - 1.0)
     alpha = (1.0 / c.SAMPLE_HZ) / 60.0
     temperature = np.empty(n)
-    temperature[0] = c.BASE_TEMPERATURE
+    temperature[0] = mill.base_temperature
     for i in range(1, n):
         temperature[i] = temperature[i - 1] + (target[i] - temperature[i - 1]) * alpha
     temperature += rng.normal(0, 0.05, n)
@@ -141,20 +146,20 @@ def generate_loop(seed=c.SEED):
     }
 
 
-def ground_truth():
-    """Known events in the loop, for testing the detector later."""
+def ground_truth(mill=RM01):
+    """Known events in the loop, for testing the detector."""
     return {
         "cobbles": [
             {"start_s": float(s), "end_s": float(s) + c.COBBLE_DURATION_S}
-            for s in c.COBBLE_STARTS_S
+            for s in mill.cobble_starts_s
         ],
         "load_change": {
-            "start_s": c.LOAD_RAMP_UP_S[0],
-            "end_s": c.LOAD_RAMP_DOWN_S[1],
+            "start_s": mill.load_ramp_up_s[0],
+            "end_s": mill.load_ramp_down_s[1],
         },
         "speed_step": {
-            "start_s": c.SPEED_STEP_DOWN_S[0],
-            "end_s": c.SPEED_STEP_UP_S[1],
+            "start_s": mill.speed_step_down_s[0],
+            "end_s": mill.speed_step_up_s[1],
         },
     }
 

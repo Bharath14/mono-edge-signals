@@ -100,3 +100,16 @@ def test_null_values_are_skipped():
     rows[250] = (rows[250][0], None, None, None, None, None, None)
     for row in rows:
         assert det.update(row) is None
+
+
+@pytest.mark.parametrize("seed", [None, 1, 7])
+def test_second_mill_finds_its_cobbles_and_ignores_its_changes(seed):
+    # RM-02 runs faster, raises its speed setpoint instead of lowering it, has
+    # a load change later in the loop and a cobble at the raised setpoint.
+    mill = c.MILLS["RM-02"]
+    closed, still_open = detect(to_rows(g.generate_loop(seed=seed, mill=mill)))
+    truth = g.ground_truth(mill)["cobbles"]
+    assert still_open is None
+    assert len(closed) == len(truth) == 4
+    for inc, cob in zip(closed, truth):
+        assert cob["start_s"] <= seconds(inc.started_at) < cob["start_s"] + 0.5
