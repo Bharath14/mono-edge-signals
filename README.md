@@ -1,15 +1,112 @@
 # Mill Signals: rolling mill monitoring
 
-Mono Edge signal analytics challenge. A synthetic rolling mill sends six PLC
+Mono Edge signal analytics challenge. Two synthetic rolling mills send six PLC
 signals every 20 ms. A Python pipeline stores them in Postgres, a detector
 finds cobble incidents, and a Next.js app lets signed-in operators watch the
-mill live, explore history and investigate incidents.
+mills live, explore history and investigate incidents.
 
-* **Live demo:** https://mono-edge-signals-seven.vercel.app
-* **Demo login:** `demo@millsignals.dev` / `MillDemo2026!` (or sign up with any email)
+## Demo access
 
-The hosted Live page replays the stored 10 minute seed loop (badge "REPLAY"),
-so a cobble alert fires about once a minute while you watch.
+| | |
+|---|---|
+| **Live app** | https://mono-edge-signals-seven.vercel.app |
+| **Email** | `demo@millsignals.dev` |
+| **Password** | `MillDemo2026!` |
+
+Every page requires login. Use the account above, or click "No account? Sign
+up" on the login page and register with any email and a password of 6 or more
+characters (no email confirmation needed).
+
+A quick tour for reviewers:
+
+1. **Live**: the hosted app replays the stored 10 minute loop on the wall
+   clock (badge "REPLAY"). On RM-01 a cobble fires every minute at :30, so
+   within a minute the status turns red, an INCIDENT banner appears and the
+   alert shows in the side panel with its time, affected signals and reason.
+   Switch mills with the dropdown.
+2. **History**: pick a mill, a signal and a time range, or use the shortcuts
+   (whole loop, a cobble, the load change, the speed step). Red bands mark
+   incidents; the table compares normal periods with incident periods.
+3. **Incidents**: every stored alert. "Explore" opens all six signals 30 s
+   either side of the incident with peaks against normal values.
+
+If the app shows a database connection error, the free Supabase project has
+paused after a week without traffic and needs to be resumed.
+
+## Local setup
+
+Needs Python 3.10 or newer, Node.js 20 or newer, and Postgres 16 or newer.
+
+```bash
+# 1. Database
+docker compose up -d                       # Postgres 16 on localhost:5432 (mill / mill / millsignals)
+
+# 2. Python simulator, pipeline and detector
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+export DATABASE_URL=postgresql://mill:mill@localhost:5432/millsignals
+
+# 3. Load data (see the next section)
+python -m simulator.seed --reset
+
+# 4. Web app
+cd web
+npm install
+cp .env.example .env.local                 # DATABASE_URL already points at the local database
+npm run dev                                # http://localhost:3000
+```
+
+With the two Supabase variables in `web/.env.local` left empty, local
+development runs without login (the header says "auth off"). A production
+build refuses every request until they are set, so a missing setting can never
+expose the app.
+
+No Docker? Any Postgres works, for example on macOS:
+`brew install postgresql@16 && brew services start postgresql@16`, then create
+a `mill` role with password `mill` and a `millsignals` database.
+
+**Tests**
+
+```bash
+python -m pytest tests                     # unit tests, no database needed
+TEST_DATABASE_URL=postgresql://mill:mill@localhost:5432/millsignals_test python -m pytest tests
+```
+
+The database tests wipe the tables, so point `TEST_DATABASE_URL` at a scratch
+database, never at the one the app uses.
+
+## Starting and replaying the simulator
+
+The simulator generates a deterministic 10 minute loop per mill (same seed,
+same data every time) and pushes it through the real ingestion pipeline:
+cleaning, raw and processed tables, 1 second rollups, then the cobble
+detector.
+
+```bash
+python -m simulator.seed                   # load every mill (safe to repeat: inserts are idempotent)
+python -m simulator.seed --reset           # wipe all tables first, then load every mill
+python -m simulator.seed --mill RM-02      # load one mill only (repeatable flag)
+python -m simulator.seed --no-faults       # clean data, no injected faults
+python -m detector.store --mill RM-01      # re-run detection on stored data (also idempotent)
+```
+
+The loop is stored at a fixed synthetic date (2026-01-01 00:00 to 00:10 UTC),
+so history and incident timestamps are stable.
+
+**Replay.** The Live page replays the stored loop with no extra process:
+`loop position = now mod 10 minutes`. Every viewer sees the same moment, the
+server keeps no state, and alerts appear as the replay reaches them. To replay
+from scratch, run `python -m simulator.seed --reset` again; the data and
+incidents come out identical.
+
+**Live mode.** If the newest stored row for a mill is less than 10 s old, the
+Live page switches that mill to real time data with a "LIVE" badge instead of
+the replay. The seeder writes the loop at its fixed date, so locally and on
+the hosted demo you will see "REPLAY".
+
+**Loading the hosted database.** Point `DATABASE_URL` at the cloud Postgres
+and run the same seed command (see Deployment).
 
 ## Architecture
 
@@ -26,54 +123,88 @@ so a cobble alert fires about once a minute while you watch.
   detector   cobble rules  --->  (writes incidents)              (email + password)
 ```
 
-The simulator and detector run on a laptop. Locally they write to Postgres in
-Docker; for the hosted demo the same seed is loaded into Supabase Postgres by
-pointing `DATABASE_URL` at it. The web app only reads.
+* **Write side (Python).** The generator produces one wide message per 20 ms
+  tick. The pipeline cleans it, stores the original in `raw_readings` and the
+  typed row in `processed_readings` in one transaction per batch, builds
+  1 second min/avg/max rollups, and runs the detector, which writes
+  `incidents` plus a full resolution snapshot around each one.
+* **Storage (Postgres).** Bronze/silver/gold style layers in one database.
+  Processed rows are partitioned by hour, so retention is a cheap partition
+  drop. Locally it runs in Docker; the hosted demo uses Supabase Postgres with
+  the same schema and a different `DATABASE_URL`.
+* **Read side (Next.js on Vercel).** API routes query Postgres directly and
+  downsample on the server with `date_bin`, so the browser only receives a few
+  hundred points per chart. The Live page polls once a second. Supabase Auth
+  handles sign-up and sign-in, and `proxy.ts` checks the session on every
+  page and API request.
 
-## Stack and why
+### Stack and why
 
 | Part | Choice | Why |
 |---|---|---|
 | Simulator, pipeline, detector | Python 3, psycopg 3 | Quick to write and test, and the detector is plain code that runs the same over history and live rows. |
-| Message transport | None, batched inserts | About 50 rows per second fits easily in plain batched inserts. A broker (Kafka or similar) would sit between producer and writer at many mills or when several consumers need the stream. |
-| Database | Postgres 16 (Docker locally, Supabase hosted) | Time series in a wide table, hourly partitions for cheap retention, `date_bin` for downsampling, JSONB for the raw layer. One `DATABASE_URL` switches local vs cloud. No extension needed, so any host works. |
-| Hosted database | Supabase (free tier) | Postgres plus authentication in one free project, so one account covers both. The seed loop is about 18 MB, well inside the 500 MB limit. |
+| Message transport | None, batched inserts | About 50 rows per second per mill fits easily in plain batched inserts. A broker (Kafka or similar) would sit between producer and writer at many mills or when several consumers need the stream. |
+| Database | Postgres (16 locally, 17 on Supabase) | Time series in a wide table, hourly partitions for cheap retention, `date_bin` for downsampling, JSONB for the raw layer. One `DATABASE_URL` switches local vs cloud. No extension needed, so any host works. |
+| Hosted database | Supabase (free tier) | Postgres plus authentication in one free project, so one account covers both. Both seed loops take about 42 MB, well inside the 500 MB limit. |
 | Web app | Next.js 16 (App Router, TypeScript) | Pages and API routes in one project, deploys to Vercel with no extra setup. API routes talk to Postgres directly with the `postgres` driver, so the SQL is visible and easy to explain. |
-| Authentication | Supabase Auth, email and password | Sign-up, sign-in, hashed passwords and session cookies already done and maintained. Writing that by hand is where security bugs live, and it would not show anything about data engineering. The check runs in `proxy.ts` on every page and API request. |
-| Charts | Recharts | Simple React API and enough for the point counts here, because the server downsamples first (about 300 points per live chart, 600 to 1500 for history). With raw 20 ms data in the browser a canvas library such as uPlot would be the better pick. |
+| Authentication | Supabase Auth, email and password | Sign-up, sign-in, hashed passwords and session cookies already done and maintained. Writing that by hand is where security bugs live, and it would not show anything about data engineering. |
+| Charts | Recharts | Simple React API and enough for the point counts here, because the server downsamples first. With raw 20 ms data in the browser a canvas library such as uPlot would be the better pick. |
 | Live updates | Polling every 1 s | Vercel functions are short lived, so held-open streams (SSE, WebSocket) are a poor fit. A 1 s poll is cheap, survives reconnects and is fast enough for operators. |
 | Hosting | Vercel | Free, deploys from GitHub on every push. |
 
-## Quick start
+## Anomaly detection approach
 
-```bash
-docker compose up -d                       # Postgres 16 on localhost:5432
-python3 -m venv .venv && source .venv/bin/activate   # Python 3.10 or newer
-pip install -r requirements.txt
-cp .env.example .env                       # DATABASE_URL for the local container
-export DATABASE_URL=postgresql://mill:mill@localhost:5432/millsignals
+The detector looks for **cobbles**: the strip jams, motor speed collapses and
+the stand starts shaking. It requires a sudden speed collapse **and** a
+vibration jump at the same time. Neither alone is enough, which is what keeps
+legitimate operating changes quiet:
 
-python -m simulator.seed --reset           # build and load the 10 minute loop for every mill, then detect incidents
-python -m simulator.seed --mill RM-02      # just one mill (repeatable)
-python -m detector.store --mill RM-02      # re-run detection on its own (safe to repeat)
-python -m pytest tests                     # unit tests (no database needed)
-TEST_DATABASE_URL=postgresql://mill:mill@localhost:5432/millsignals_test python -m pytest tests   # plus database tests
+| Situation | Speed vs baseline | Vibration vs baseline | Result |
+|---|---|---|---|
+| Cobble | below 80 percent | more than +1.5 mm/s | incident |
+| Load change | flat | flat | nothing (current, torque and force alone never trigger) |
+| Speed setpoint change | moves about 5 rpm/s, baseline follows | flat | nothing |
+| Single noisy sample | brief | brief | nothing (needs 0.2 s in a row) |
 
-cd web && npm install && cp .env.example .env.local && npm run dev   # web app on http://localhost:3000
-```
+* **Baseline**: rolling median of the last 5 s of normal samples per signal,
+  per mill. Comparing against a baseline instead of a fixed threshold is why
+  slow setpoint changes do not alert and why the same thresholds work on both
+  mills. The baseline is frozen while an incident is open.
+* **Open**: the cobble condition holds for 10 consecutive samples (0.2 s).
+* **Close (hysteresis)**: speed back above 95 percent and vibration within
+  1 mm/s of baseline continuously for 3 s, because speed wobbles while it
+  recovers.
+* **Output**: one incident per cobble with start, end, affected signals
+  (speed and vibration, plus current, torque or force if they spiked more
+  than 15 percent), peaks against baseline, and a reason such as "motor speed
+  fell from 1000 to 351 rpm (-65%) while vibration rose to 7.9 mm/s (normal
+  2.0); current +59%, torque +49%, force +24%".
+* **Streaming and idempotent**: `CobbleDetector.update(row)` is a state
+  machine, so the same code runs over stored history or live rows. Incidents
+  are upserted on `(mill_id, started_at)`, so re-running never duplicates.
 
-The database tests wipe the tables, so point `TEST_DATABASE_URL` at a scratch
-database. Running the seed twice is safe: every insert is idempotent.
+**Results**: RM-01 10 of 10 and RM-02 4 of 4 cobbles detected, each opening
+0.10 to 0.16 s after the cobble starts, with no incidents during either mill's
+load change or speed step. The tests repeat this on other noise seeds with
+data faults injected.
 
-No Docker? Any Postgres 16 works, for example on macOS:
-`brew install postgresql@16 && brew services start postgresql@16`, then create
-a `mill` role with password `mill` and a `millsignals` database.
+**Limits**: thresholds are tuned to the synthetic data; on a real mill they
+would be set per mill from historical incidents. A cobble while speed is
+already ramping hard, or a slow jam without a vibration jump, would need extra
+rules.
+
+Code: `detector/cobble.py` (pure logic) and `detector/store.py` (database).
+Thresholds are constants at the top of `detector/cobble.py`.
+
+---
+
+# Details
 
 ## The 10 minute loop
 
-Two mills, six signals each, one reading every 20 ms (30,000 ticks per mill
-per loop). Each mill has its own operating point and its own day, so the
-detector is tested on two different shapes of normal.
+Two mills, six signals each (motor speed, motor current, torque, rolling
+force, vibration, temperature), 30,000 ticks per mill per loop. Each mill has
+its own operating point and its own day.
 
 **RM-01** (roughing stand, 1000 rpm, 150 A, 40 kN.m, 2000 kN)
 
@@ -94,8 +225,7 @@ The cobbles at 2:30 and 3:30 sit at the edges of the load change on purpose.
 | 5:30 to 6:45 | Legitimate load change | current, torque, rolling force rise about 30 percent |
 
 The 2:30 cobble on RM-02 happens while speed sits at the raised setpoint, so
-the drop is measured from 1298 rpm, not from the usual 1200. That only works
-because the detector compares against a rolling baseline.
+the drop is measured from 1298 rpm, not from the usual 1200.
 
 Mill profiles and event times live in `simulator/config.py` (`MILLS`), and
 `generator.ground_truth(mill)` returns them so the detector can be tested
@@ -126,94 +256,14 @@ garbage timestamps) so these rules are exercised on every seed.
 | Malformed message | Kept in raw, logged in rejected_readings |
 | Crash mid batch | One transaction per batch, so all or nothing |
 
-## Cobble detection
-
-Code: `detector/cobble.py` (pure logic, no database) and `detector/store.py`
-(reads processed rows, writes incidents and snapshots). The seed runs it at the
-end, and `python -m detector.store` runs it again on any time range.
-
-A cobble shows up as a sudden speed collapse together with a vibration jump.
-Neither alone is enough, which is what keeps legitimate changes quiet:
-
-| Situation | Speed vs baseline | Vibration vs baseline | Result |
-|---|---|---|---|
-| Cobble | below 80 percent | more than +1.5 mm/s | incident |
-| Load change | flat | flat | nothing (current, torque and force alone never trigger) |
-| Speed setpoint change | moves about 5 rpm/s, baseline follows | flat | nothing |
-| Single noisy sample | brief | brief | nothing (needs 0.2 s in a row) |
-
-How it works:
-
-* **Baseline**: rolling median of the last 5 s of normal samples for each
-  signal. Comparing against a baseline instead of a fixed threshold is why the
-  slow setpoint change does not alert. The baseline is frozen while an incident
-  is open so the incident cannot drag it down.
-* **Open**: speed below 80 percent of baseline and vibration more than
-  1.5 mm/s above baseline for 10 consecutive samples (0.2 s).
-* **Close (hysteresis)**: speed back above 95 percent and vibration within
-  1 mm/s of baseline, continuously for 3 s. Speed wobbles while it recovers,
-  so one good sample is not enough. The end time is when signals first came
-  back to normal.
-* **Output**: start, end, affected signals (speed and vibration, plus current,
-  torque or force if they spiked more than 15 percent), peak values with the
-  baseline, and a reason such as "motor speed fell from 1000 to 351 rpm (-65%)
-  while vibration rose to 7.9 mm/s (normal 2.0); current +59%, torque +49%,
-  force +24%".
-* **Idempotent**: incidents are upserted on `(mill_id, started_at)` and their
-  snapshots rebuilt, so re-running detection never duplicates anything.
-
-The detector is a streaming state machine (`CobbleDetector.update(row)`), so
-the same code runs over stored history and over live data as it arrives.
-
-Results on the seed loop: RM-01 10 of 10 and RM-02 4 of 4 cobbles detected,
-each opening 0.10 to 0.16 s after the cobble starts, and no incidents during
-either mill's load change or speed step (down on RM-01, up on RM-02). The same
-thresholds work on both stands because everything is relative to each mill's
-own baseline. The tests repeat this on other noise seeds with data faults
-injected. Thresholds are constants at the top of `detector/cobble.py`.
-
-Limits: the thresholds are tuned to the synthetic data. On a real mill they
-would be set from historical incidents and per mill. A cobble that happens
-while speed is already ramping hard, or a slow jam without a vibration jump,
-would need extra rules.
-
 ## Web app
 
 Code is in `web/`. Pages: **Live** (status, latest values, live charts,
 alerts), **History** (signal and time range, trend with min to max band,
-normal vs abnormal stats), **Incidents** (alert history) and an **incident
-view** (all signals 30 s either side, peaks vs normal).
+normal vs abnormal stats), **Incidents** (alert history with a mill filter)
+and an **incident view** (all signals 30 s either side, peaks vs normal).
 
-### Run locally
-
-```bash
-cd web
-npm install
-cp .env.example .env.local     # DATABASE_URL already points at the local database
-npm run dev                    # http://localhost:3000
-```
-
-With the two Supabase variables empty, local development runs without login
-(the header says "auth off"). A production build refuses every request until
-they are set, so a missing setting can never expose the app.
-
-### Live vs replay
-
-The hosted app cannot reach a simulator on a laptop, so the Live page has two
-modes, chosen per request:
-
-* **LIVE**: the newest stored row is less than 10 s old, so a simulator is
-  streaming. Charts show the last 30 s to 2 min of real data.
-* **REPLAY (demo loop)**: otherwise the stored 10 minute seed loop is replayed
-  on the wall clock: `loop position = now mod 10 min`. Every viewer sees the
-  same moment, the server keeps no state, and a window that crosses the loop
-  start is stitched from the end of the loop.
-
-Alerts appear as the replay reaches them, so a reviewer sees a cobble alert
-fire within a minute of opening the page. History and the incident pages
-always show stored data by its real timestamps.
-
-### How the API keeps the browser light
+How the API keeps the browser light:
 
 | Endpoint | Reads | Downsampling |
 |---|---|---|
@@ -223,7 +273,8 @@ always show stored data by its real timestamps.
 | `/api/incidents/:id` | `incident_snapshots` | 100 ms averages |
 
 Min and max travel with every averaged point, so a cobble spike is still
-visible on a 10 minute chart.
+visible on a 10 minute chart. In replay, a live window that crosses the loop
+start is stitched from the end of the loop.
 
 ## Deployment
 
@@ -239,17 +290,16 @@ visible on a 10 minute chart.
    The lockdown script stops Supabase's public REST API from reading the
    tables (the app connects to Postgres directly and does not need it).
 3. **Vercel**: import the GitHub repo, set Root Directory to `web`, and add
-   the environment variables. `web/vercel.json` pins the functions to Tokyo
-   (`hnd1`), the same region as the Supabase database, because every API call
-   makes a few queries and cross-region round trips would add up:
+   the environment variables:
    * `DATABASE_URL`: the Transaction pooler string (port 6543)
    * `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`: from
      Project Settings > API
+
+   `web/vercel.json` pins the functions to Tokyo (`hnd1`), the same region as
+   the database, because every API call makes a few queries and cross-region
+   round trips would add up.
 4. Sign up once on the deployed app to create the demo account.
 
-The Vercel project is connected to this GitHub repo with Root Directory
-`web`, so every push to `main` deploys to production and other branches get
-preview URLs. A failed build never replaces the running site.
-
-Free Supabase projects pause after a week without activity. If the demo
-shows a connection error, the project needs to be resumed in the dashboard.
+The Vercel project is connected to this GitHub repo, so every push to `main`
+deploys to production and other branches get preview URLs. A failed build
+never replaces the running site.
