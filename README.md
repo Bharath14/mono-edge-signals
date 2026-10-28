@@ -33,6 +33,65 @@ A quick tour for reviewers:
 If the app shows a database connection error, the free Supabase project has
 paused after a week without traffic and needs to be resumed.
 
+## Data pipeline
+
+How a 20 ms PLC reading gets from the simulator into the tables the app reads.
+
+```
+ generator          cleaning              batch writer (1 transaction)           after load
+ ---------          --------              ----------------------------           ----------
+ 1 wide JSON  --->  parse timestamp  --->  raw_readings        (as received)  --> rollup.py
+ message per        check mill_id          processed_readings  (typed, hourly      1 s min/avg/max
+ 20 ms tick         types + ranges          partitions)                            -> historical_rollups
+ (6 signals)        reject reasons    --->  rejected_readings   (with reason)  --> detector
+                                                                                    -> incidents
+     batches of 500 messages (10 s of data)                                         -> incident_snapshots
+     retry 0.5 s, 1 s, 2 s, 4 s, then spool to spool/pending_batches.jsonl
+```
+
+1. **Generate.** `simulator/generator.py` builds the 10 minute loop per mill
+   with numpy and turns each tick into one wide JSON message, the shape a PLC
+   gateway would send. The seeder also injects faults (dropped samples, nulls,
+   a -9999 sentinel, numbers as text, garbage timestamps).
+2. **Clean.** `simulator/cleaning.py` turns a message into a typed row plus
+   any problems. A bad field becomes NULL and is logged; a message with no
+   usable timestamp or mill is refused whole. Every refusal has a reason.
+3. **Write.** `simulator/pipeline.py` writes raw, processed and rejects for a
+   batch in one transaction, creating hourly partitions as needed. Every
+   insert is `ON CONFLICT DO NOTHING`, so a retried batch or a re-run seed
+   adds nothing.
+4. **Aggregate.** `simulator/rollup.py` builds 1 second min/avg/max per signal
+   from processed rows (upsert, re-runnable).
+5. **Detect.** `detector/store.py` runs the cobble detector over processed
+   rows and stores incidents, each with a full resolution snapshot from 30 s
+   before to 30 s after.
+
+### Pipeline tech stack
+
+| Layer | Tool | Role |
+|---|---|---|
+| Language | Python 3.10+ | simulator, cleaning, writer, detector in one codebase |
+| Data generation | numpy | vectorised signal model, deterministic per seed |
+| Database driver | psycopg 3 (`executemany`) | batched parameterised inserts, one transaction per batch |
+| Storage | PostgreSQL 16 (Docker) / 17 (Supabase) | raw JSONB, typed time series, rollups, incidents in one database |
+| Partitioning | native range partitions by hour | retention by dropping a partition, smaller indexes per hour |
+| Downsampling | `date_bin` in SQL | server side bucketing for every chart |
+| Tests | pytest | cleaning rules, generator ground truth, detector, DB integration |
+
+### Trade-offs
+
+| Decision | Chosen | Alternative | Why, and when to switch |
+|---|---|---|---|
+| Transport | Direct batched inserts | Kafka, MQTT broker | About 50 rows/s per mill is tiny for Postgres. A broker adds a cluster to run for no gain at this volume. Add one when there are many mills, several consumers of the same stream, or producers that must not block on the database. |
+| Processing model | Micro-batches of 500 (10 s) | Row by row streaming, Spark/Flink | Batching cuts database round trips and transactions by orders of magnitude and makes each batch atomic. Costs up to 10 s of latency on the write side, fine for monitoring. A stream processor pays off for windowed joins across many mills, not here. |
+| Delivery guarantee | At-least-once + idempotent writes | Exactly-once protocol | Retries can resend a batch, and conflict keys make the duplicate a no-op, so the result is effectively once with no coordination. |
+| Outage handling | Retry with backoff, then local spool file | Durable queue | The spool keeps data through a long database outage with zero infrastructure. It lives on one disk, so a lost laptop loses the spool; a broker would fix that. |
+| Storage engine | Plain Postgres, hourly partitions | TimescaleDB, InfluxDB, ClickHouse | No extension, so it runs on any host including Supabase free tier. The cost: no column compression, and continuous aggregates are replaced by a hand built rollup table. Switch at billions of rows or when storage cost matters. |
+| Table shape | Wide: one row per timestamp, six columns | Long: one row per signal reading | Matches how the PLC sends data, 6x fewer rows, simple queries. Adding a signal needs a migration; long format would not. |
+| Raw layer | Keep every message as JSONB | Drop bad messages | Nothing is lost and cleaning can be re-run, at about 460 bytes per row (roughly 2 GB per mill per day at full rate). In production raw would move to cheap object storage after a few days. |
+| Rollups | 1 s min/avg/max, built after load | Averages only, or compute at query time | Min and max keep cobble spikes visible after aggregation. Built in batch here; with live data it would run every few seconds or as a continuous aggregate. |
+| Detection | Rule based state machine | ML anomaly model | Explainable reason text, no training data needed, tested against known ground truth. Thresholds are hand tuned to this data; a model would need labelled real incidents. |
+
 ## Local setup
 
 Needs Python 3.10 or newer, Node.js 20 or newer, and Postgres 16 or newer.
@@ -123,11 +182,8 @@ and run the same seed command (see Deployment).
   detector   cobble rules  --->  (writes incidents)              (email + password)
 ```
 
-* **Write side (Python).** The generator produces one wide message per 20 ms
-  tick. The pipeline cleans it, stores the original in `raw_readings` and the
-  typed row in `processed_readings` in one transaction per batch, builds
-  1 second min/avg/max rollups, and runs the detector, which writes
-  `incidents` plus a full resolution snapshot around each one.
+* **Write side (Python).** Generator, cleaning, batch writer, rollups and
+  detector, described in [Data pipeline](#data-pipeline).
 * **Storage (Postgres).** Bronze/silver/gold style layers in one database.
   Processed rows are partitioned by hour, so retention is a cheap partition
   drop. Locally it runs in Docker; the hosted demo uses Supabase Postgres with
@@ -138,12 +194,10 @@ and run the same seed command (see Deployment).
   handles sign-up and sign-in, and `proxy.ts` checks the session on every
   page and API request.
 
-### Stack and why
+### App stack and why
 
 | Part | Choice | Why |
 |---|---|---|
-| Simulator, pipeline, detector | Python 3, psycopg 3 | Quick to write and test, and the detector is plain code that runs the same over history and live rows. |
-| Message transport | None, batched inserts | About 50 rows per second per mill fits easily in plain batched inserts. A broker (Kafka or similar) would sit between producer and writer at many mills or when several consumers need the stream. |
 | Database | Postgres (16 locally, 17 on Supabase) | Time series in a wide table, hourly partitions for cheap retention, `date_bin` for downsampling, JSONB for the raw layer. One `DATABASE_URL` switches local vs cloud. No extension needed, so any host works. |
 | Hosted database | Supabase (free tier) | Postgres plus authentication in one free project, so one account covers both. Both seed loops take about 42 MB, well inside the 500 MB limit. |
 | Web app | Next.js 16 (App Router, TypeScript) | Pages and API routes in one project, deploys to Vercel with no extra setup. API routes talk to Postgres directly with the `postgres` driver, so the SQL is visible and easy to explain. |
