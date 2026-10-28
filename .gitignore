@@ -5,3 +5,4 @@ spool/
 .pgtest/
 .venv/
 .DS_Store
+supabase/.temp/
