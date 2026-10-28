@@ -131,8 +131,8 @@ export default function LivePage() {
 
       <SignalPicker selected={selected} onChange={setSelected} />
 
-      <div className="grid lg:grid-cols-[1fr_320px] gap-5">
-        <div className="grid md:grid-cols-2 gap-3">
+      <div className="grid lg:grid-cols-[1fr_320px] gap-5 items-start">
+        <div className="grid md:grid-cols-2 gap-3 content-start">
           {selected.map((key) => {
             const s = getSignal(key)!;
             return (
@@ -158,7 +158,7 @@ export default function LivePage() {
             {data?.mode === "REPLAY" ? "Fired so far in this pass of the demo loop." : "Last hour."}
           </p>
           {!data?.alerts.length && <p className="text-sm text-muted">No alerts.</p>}
-          <ul className="space-y-3">
+          <ul className="space-y-3 max-h-[560px] overflow-y-auto pr-1">
             {data?.alerts.map((a) => (
               <li key={a.id} className="text-sm border-l-2 border-red-500 pl-3">
                 <div className="flex justify-between text-xs text-muted">
