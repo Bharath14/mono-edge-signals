@@ -115,6 +115,22 @@ How a 20 ms PLC reading gets from the simulator into the tables the app reads.
 | Rollups | 1 s min/avg/max, built after load | Averages only, or compute at query time | Min and max keep cobble spikes visible after aggregation. Built in batch here; with live data it would run every few seconds or as a continuous aggregate. |
 | Detection | Rule based state machine | ML anomaly model | Explainable reason text, no training data needed, tested against known ground truth. Thresholds are hand tuned to this data; a model would need labelled real incidents. |
 
+## Repository layout
+
+```
+simulator/          signal generator, cleaning rules, batch writer, rollups, seed CLI
+detector/           cobble detector (cobble.py, pure logic) and its database runner (store.py)
+db/                 schema.sql (all tables) and supabase_lockdown.sql (hosted only)
+tests/              pytest: generator, cleaning, detector, database integration
+web/                Next.js app
+  src/proxy.ts      login check for every page and API route
+  src/app/api/      live, history, incidents and mills endpoints
+  src/app/          Live, History, Incidents, incident view and login pages
+  src/lib/          database client, signal metadata, Supabase config
+docs/screenshots/   images used in this README
+docker-compose.yml  local Postgres
+```
+
 ## Local setup
 
 Needs Python 3.10 or newer, Node.js 20 or newer, and Postgres 16 or newer.
