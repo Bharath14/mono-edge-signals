@@ -30,6 +30,29 @@ A quick tour for reviewers:
 3. **Incidents**: every stored alert. "Explore" opens all six signals 30 s
    either side of the incident with peaks against normal values.
 
+### Screenshots
+
+**Live monitoring** during a cobble on RM-01: status INCIDENT, the alert with
+its reason, and the incident window shaded red on every chart.
+
+![Live monitoring during an incident](docs/screenshots/live.png)
+
+**Historical analytics**: motor speed over the whole loop from 1 s rollups.
+The line is the average, the band is min to max, red bands are detected
+incidents. The slow dip around 7:00 is the legitimate speed step, which does
+not alert.
+
+![Historical analytics](docs/screenshots/history.png)
+
+**Incident view**: all six signals 30 s either side of the 2:30 cobble, which
+lands right after the load change ramp, with peaks against normal values.
+
+![Incident view](docs/screenshots/incident.png)
+
+**Incident history** across both mills.
+
+![Incident history](docs/screenshots/incidents.png)
+
 If the app shows a database connection error, the free Supabase project has
 paused after a week without traffic and needs to be resumed.
 
